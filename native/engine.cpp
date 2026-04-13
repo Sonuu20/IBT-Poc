@@ -37,7 +37,7 @@ extern "C"
   EMSCRIPTEN_KEEPALIVE
   void process_updates(uint8_t *buffer, int count)
   {
-    // Cast the raw bytes directly to our Struct 
+    // Cast the raw bytes directly to our Struct
     MarketUpdate *updates = reinterpret_cast<MarketUpdate *>(buffer);
 
     for (int i = 0; i < count; i++)
@@ -107,6 +107,17 @@ extern "C"
   {
     metrics_buffer[0] = (packet_count > 0) ? (total_latency / packet_count) : 0;
     metrics_buffer[1] = (double)last_seq;
+
+    // maxQty calculate karo WASM me hi
+    double maxQty = 1.0;
+    for (auto const &[p, q] : bids)
+      if (q > maxQty)
+        maxQty = q;
+    for (auto const &[p, q] : asks)
+      if (q > maxQty)
+        maxQty = q;
+    metrics_buffer[2] = maxQty;
+
     return metrics_buffer;
   }
 }

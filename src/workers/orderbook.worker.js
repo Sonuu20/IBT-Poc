@@ -3,54 +3,55 @@ import wasmUrl from "../wasm/engine.wasm?url";
 
 let wasmEngine = null;
 
-createEngineModule({
-  locateFile: () => wasmUrl,
-}).then((Module) => {
+// Pre-allocated pointers — malloc sirf ONCE at init
+let inputBufferPtr = null;
+let INPUT_BUFFER_SIZE = 24 * 1000; // max 1000 updates per packet
+
+createEngineModule({ locateFile: () => wasmUrl }).then((Module) => {
   wasmEngine = Module;
-  console.log("🔥 WASM C++ Engine Booted in ES Worker!");
+
+  // 🔥 One-time allocation
+  inputBufferPtr = wasmEngine._malloc(INPUT_BUFFER_SIZE);
+
+  console.log("WASM Engine ready, buffer pre-allocated at:", inputBufferPtr);
 });
 
+const sharedTop50 = new Float64Array(200);
+const sharedMetrics = new Float64Array(3);
+
 self.onmessage = (event) => {
-  if (!wasmEngine) return;
+  if (!wasmEngine || inputBufferPtr === null) return;
 
   const { buffer, startTime } = event.data;
   const byteLength = buffer.byteLength;
   const count = byteLength / 24;
 
-  // 🔥 BULLETPROOF MEMORY ACCESS: Agar HEAPU8 nahi mila, toh native WebAssembly memory use karo
-  const heapU8 =
-    wasmEngine.HEAPU8 || new Uint8Array(wasmEngine.wasmMemory.buffer);
-  const heapF64 =
-    wasmEngine.HEAPF64 || new Float64Array(wasmEngine.wasmMemory.buffer);
+  // Resize pre-allocated buffer if needed (rare case)
+  if (byteLength > INPUT_BUFFER_SIZE) {
+    wasmEngine._free(inputBufferPtr);
+    INPUT_BUFFER_SIZE = byteLength * 2;
+    inputBufferPtr = wasmEngine._malloc(INPUT_BUFFER_SIZE);
+  }
 
-  const wasmBufferPtr = wasmEngine._malloc(byteLength);
+  // Direct HEAPU8 write — no intermediate Uint8Array
+  wasmEngine.HEAPU8.set(new Uint8Array(buffer), inputBufferPtr);
+  wasmEngine._process_updates(inputBufferPtr, count);
 
-  // Yahan ab direct heapU8 use karenge
-  heapU8.set(new Uint8Array(buffer), wasmBufferPtr);
-
-  wasmEngine._process_updates(wasmBufferPtr, count);
-
+  // Pointers fetch
   const top50Ptr = wasmEngine._get_top_50();
   const metricsPtr = wasmEngine._get_metrics();
 
-  // Yahan ab direct heapF64 use karenge
-  const top50Array = heapF64.subarray(top50Ptr / 8, top50Ptr / 8 + 200);
-  const metricsArray = heapF64.subarray(metricsPtr / 8, metricsPtr / 8 + 3);
+  const heapF64 = wasmEngine.HEAPF64;
 
-  const avgLatency = metricsArray[0].toFixed(3);
-  const sequence = metricsArray[1];
+  // Direct copy into pre-allocated output — no .slice()
+  sharedTop50.set(heapF64.subarray(top50Ptr / 8, top50Ptr / 8 + 200));
+  sharedMetrics.set(heapF64.subarray(metricsPtr / 8, metricsPtr / 8 + 3));
 
-  const payload = new Float64Array(top50Array).slice();
-
-  wasmEngine._free(wasmBufferPtr);
-
-  self.postMessage(
-    {
-      buffer: payload.buffer,
-      avgLatency: avgLatency,
-      sequence: sequence,
-      startTime: startTime,
-    },
-    [payload.buffer],
-  );
+  self.postMessage({
+    top50: sharedTop50,
+    avgLatency: sharedMetrics[0].toFixed(3),
+    sequence: sharedMetrics[1],
+    startTime,
+  });
+  // ⚠️ buffer transfer nahi — input buffer ownership WASM ke paas
 };
