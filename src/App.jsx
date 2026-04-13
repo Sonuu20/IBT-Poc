@@ -1,4 +1,4 @@
-import { onCleanup, onMount } from "solid-js";;
+import { onCleanup, onMount } from "solid-js";
 import OrderbookWorker from "./workers/orderbook.worker.js?worker";
 import RendererWorker from "./workers/render.worker.js?worker";
 
@@ -9,7 +9,7 @@ function App() {
   let ws;
 
   onMount(() => {
-    // 1. Renderer Worker — OffscreenCanvas ko transfer karo
+    // 1. Renderer Worker
     rendererWorker = new RendererWorker();
     const offscreen = canvasRef.transferControlToOffscreen();
 
@@ -21,28 +21,44 @@ function App() {
         height: window.innerHeight,
         devicePixelRatio: window.devicePixelRatio || 1,
       },
-      [offscreen], // Transfer ownership
+      [offscreen],
     );
 
-    // 2. Orderbook Worker — processed data renderer ko bhejo
+    // 🔥 Listen render completion (TEST HOOK)
+    rendererWorker.onmessage = (e) => {
+      if (e.data?.type === "render-done") {
+        window.dispatchEvent(new Event("render-done"));
+      }
+    };
+
+    // 2. Orderbook Worker
     orderbookWorker = new OrderbookWorker();
+
     orderbookWorker.onmessage = (e) => {
-      // Main thread sirf forward karta hai — zero processing
+      const data = e.data;
+
+      //  expose sequence globally for test
+      window.__lastSequence = data.sequence;
+      //  TEST HOOK → WS → worker processed
+      window.dispatchEvent(new Event("worker-done"));
+
       rendererWorker.postMessage({ type: "draw", data: e.data });
     };
 
     // 3. WebSocket
     ws = new WebSocket("ws://localhost:8080");
     ws.binaryType = "arraybuffer";
+
     ws.onmessage = (event) => {
       if (!orderbookWorker || !event.data) return;
-      const startTime = performance.timeOrigin + performance.now();
-      orderbookWorker.postMessage({ buffer: event.data, startTime }, [
-        event.data,
-      ]);
+
+      // 🔥 TEST HOOK → WS received
+      window.dispatchEvent(new Event("ws-data"));
+
+      orderbookWorker.postMessage({ buffer: event.data }, [event.data]);
     };
 
-    // 4. Resize handler
+    // 4. Resize
     const onResize = () => {
       rendererWorker.postMessage({
         type: "resize",
@@ -50,6 +66,7 @@ function App() {
         height: window.innerHeight,
       });
     };
+
     window.addEventListener("resize", onResize);
 
     onCleanup(() => {
@@ -62,7 +79,6 @@ function App() {
 
   return (
     <div class="fixed inset-0 overflow-hidden bg-slate-900">
-      {/* alpha:false already renderer worker me set hai */}
       <canvas ref={canvasRef} class="block size-full" />
     </div>
   );
